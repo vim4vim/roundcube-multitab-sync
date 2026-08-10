@@ -1,0 +1,10 @@
+{
+    "name": "vim4vim/multitab_sync",
+    "type": "roundcube-plugin",
+    "description": "Keeps the Roundcube message list up to date in every browser tab, not only in the one that polled first.",
+    "license": "GPL-3.0-or-later",
+    "version": "1.0.0",
+    "require": {
+        "roundcube/plugin-installer": "~0.3.5"
+    }
+}

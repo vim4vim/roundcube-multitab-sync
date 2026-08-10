@@ -1,0 +1,8 @@
+# Local plugin configuration.
+# Ship config.inc.php.dist instead; it is loaded first as defaults.
+config.inc.php
+
+# Editor and OS noise
+.idea/
+*.swp
+.DS_Store

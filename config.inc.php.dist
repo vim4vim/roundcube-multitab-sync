@@ -1,0 +1,12 @@
+<?php
+
+// Set to false to disable the plugin without uninstalling it.
+$config['multitab_sync_enabled'] = true;
+
+// Seconds after which a tab's stored state is discarded. A tab that has been
+// quiet for longer is assumed closed; if it comes back it simply starts over.
+$config['multitab_sync_ttl'] = 3600;
+
+// Upper bound on how many tabs are tracked per session. The least recently
+// seen ones are dropped first. Guards the session against unbounded growth.
+$config['multitab_sync_max_tabs'] = 20;
