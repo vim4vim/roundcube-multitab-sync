@@ -59,6 +59,12 @@ class multitab_sync extends rcube_plugin
 
         $this->add_hook('check_recent', [$this, 'swap_in']);
         $this->add_hook('refresh', [$this, 'swap_out']);
+
+        // a notifier only stays quiet if it sees the trimmed range, so this
+        // handler has to run before it; register_hook() appends, so put ours
+        // in front rather than depend on the order of $config['plugins']
+        $this->api->handlers['new_messages'] = array_merge(
+            [[$this, 'dedupe']], $this->api->handlers['new_messages'] ?? []);
     }
 
     /**
@@ -134,6 +140,37 @@ class multitab_sync extends rcube_plugin
     }
 
     /**
+     * Ahead of any notifier plugin: drop the part of a new-message range that
+     * another tab has already reported. Roundcube announces new mail once per
+     * client; with per-tab reference values every tab is a client, so without
+     * this every open tab notifies for the same message.
+     */
+    public function dedupe($args)
+    {
+        $range = explode(':', (string) ($args['diff']['new'] ?? ''));
+        $last = (int) array_pop($range);
+        $first = $range ? (int) $range[0] : $last;
+
+        if (!$last) {
+            return $args;
+        }
+
+        $known = $this->reported($args['mailbox']);
+
+        if ($known >= $last) {
+            // the union in exec_hook() merges per top-level key, so the 'diff'
+            // returned here replaces the one passed in - dropping 'diff' itself
+            // would let the original come back
+            unset($args['diff']['new']);
+        } elseif ($known >= $first) {
+            // same shape folder_status() builds: "M:N", or "N" for a single UID
+            $args['diff']['new'] = ($known + 1 < $last ? ($known + 1) . ':' : '') . $last;
+        }
+
+        return $args;
+    }
+
+    /**
      * The identifier the client keeps in sessionStorage, or null when it is
      * absent or malformed. The value becomes part of a session key name, so
      * the pattern is deliberately strict rather than merely sanitising.
@@ -189,5 +226,25 @@ class multitab_sync extends rcube_plugin
     private function forget($key)
     {
         rcmail::get_instance()->session->remove($key);
+    }
+
+    /**
+     * The highest UID any other tab has already seen in this folder, which is
+     * the same thing as the highest one the user has already been told about.
+     */
+    private function reported($folder)
+    {
+        $mine = self::PREFIX . $this->tabid;
+        $max = 0;
+
+        foreach ($_SESSION as $key => $bucket) {
+            if ($key === $mine || strpos($key, self::PREFIX) !== 0 || !is_array($bucket)) {
+                continue;
+            }
+
+            $max = max($max, (int) ($bucket['folders'][$folder]['maxuid'] ?? 0));
+        }
+
+        return $max;
     }
 }

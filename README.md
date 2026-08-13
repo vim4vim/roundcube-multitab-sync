@@ -35,6 +35,15 @@ swaps that tab's own values in before Roundcube's folder loop (`check_recent`
 hook) and stores them again afterwards (`refresh` hook). Nothing in the core
 changes — Roundcube just sees each tab as its own client.
 
+New mail is still announced **once**, not once per tab. Roundcube fires the
+`new_messages` hook in whichever client consumes the change, and a notifier
+plugin turns that into a desktop notification, a sound or a favicon change.
+Every tab consuming the change would mean every tab announcing it, so the plugin
+trims the UID range that hook carries down to the part no other tab has reported
+yet, and removes it altogether when nothing is left. Its handler is put in front
+of the ones already registered, so the order of `$config['plugins']` does not
+matter.
+
 Two smaller pieces cut the delay rather than fix correctness:
 
 - Tabs announce their own deletes, moves and flag changes over a
@@ -92,7 +101,8 @@ php tests/multitab_sync_test.php
 It stubs the plugin API, copies `rcube_imap::folder_status()` verbatim, and then
 reproduces the bug with the plugin off before checking that two tabs both see a
 new message, a deletion reaches both, a late-joining tab seeds quietly, buckets
-are garbage-collected, and a malformed tab id falls back to stock behaviour.
+are garbage-collected, a malformed tab id falls back to stock behaviour, and a
+new message is announced exactly once however many tabs poll.
 
 ## Limits
 
@@ -111,6 +121,11 @@ are garbage-collected, and a malformed tab id falls back to stock behaviour.
 - Roundcube keeps other view state session-wide as well: current page, sort
   order, and the active search. Searching or re-sorting in one tab can still
   affect another. That is a separate issue and out of scope here.
+- Two tabs polling in the very same moment can both announce the same message:
+  the value that decides is written at the end of a request, and the database
+  session handler does not lock. Rare, rather than every time.
+- A tab left frozen until its state expires (`multitab_sync_ttl`) can announce a
+  message once more when it wakes up.
 - Without `BroadcastChannel` the cross-tab notifications are skipped. The main
   fix does not depend on them.
 

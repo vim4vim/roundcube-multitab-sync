@@ -54,10 +54,43 @@ class rcmail
     }
 }
 
+class rcube_plugins_stub
+{
+    public $handlers = [];
+
+    public function register_hook($hook, $callback)
+    {
+        $this->handlers[$hook][] = $callback;
+    }
+
+    /**
+     * As rcube_plugin_api::exec_hook() does it: each handler's return is
+     * merged over the args with a union, which works per top-level key.
+     */
+    public function exec_hook($hook, $args = [])
+    {
+        foreach ($this->handlers[$hook] ?? [] as $callback) {
+            $ret = $callback($args);
+
+            if ($ret && is_array($ret)) {
+                $args = $ret + $args;
+            }
+        }
+
+        return $args;
+    }
+}
+
 abstract class rcube_plugin
 {
     public $task;
+    public $api;
     public $hooks = [];
+
+    public function __construct($api)
+    {
+        $this->api = $api;
+    }
 
     abstract public function init();
 
@@ -129,6 +162,7 @@ class fake_storage
 
 $storage = new fake_storage();
 $failures = 0;
+$notified = null;
 
 function check($label, $got, $want)
 {
@@ -140,16 +174,47 @@ function check($label, $got, $want)
     printf("  [%s] %-58s got=%s want=%s\n", $ok ? 'ok' : 'FAIL', $label, json_encode($got), json_encode($want));
 }
 
-/** One check-recent request from one tab, with the plugin on or off. */
-function poll($tabid, $folders, $enabled = true)
+/** Stand-in for newmail_notifier::notify(): records the range it was handed. */
+function register_notifier($api)
 {
-    global $storage;
+    $api->register_hook('new_messages', static function ($args) {
+        global $notified;
+
+        if (!empty($args['diff']['new'])) {
+            $notified = $args['diff']['new'];
+        }
+
+        return $args;
+    });
+}
+
+/**
+ * One check-recent request from one tab, with the plugin on or off. $notifier
+ * places a notifier plugin 'after' this one in the hook chain or 'before' it -
+ * both are valid plugin orders - or leaves it out with 'none', the way the
+ * Refresh button does: it posts check-recent, where newmail_notifier binds
+ * nothing.
+ */
+function poll($tabid, $folders, $enabled = true, $notifier = 'after')
+{
+    global $storage, $notified;
+
+    $notified = null;
+    $api = new rcube_plugins_stub();
+
+    if ($notifier == 'before') {
+        register_notifier($api);
+    }
 
     rcube_utils::$input['_tabid'] = $tabid;
     rcmail::$instance->config->values['multitab_sync_enabled'] = $enabled;
 
-    $plugin = new multitab_sync();
+    $plugin = new multitab_sync($api);
     $plugin->init();
+
+    if ($notifier == 'after') {
+        register_notifier($api);
+    }
 
     $args = ['folders' => $folders, 'all' => false];
 
@@ -161,6 +226,10 @@ function poll($tabid, $folders, $enabled = true)
     foreach ($args['folders'] as $f) {
         $diff = [];
         $status[$f] = $storage->folder_status($f, $diff);
+
+        if ($status[$f] & 1) {
+            $api->exec_hook('new_messages', ['mailbox' => $f, 'is_current' => true, 'diff' => $diff]);
+        }
     }
 
     foreach ($plugin->hooks['refresh'] ?? [] as $cb) {
@@ -260,10 +329,72 @@ echo "\n7. Fallback without a usable tab id\n";
 rcmail::$instance->config->values['multitab_sync_max_tabs'] = 20;
 foreach ([null, '', 'short', 'UPPERCASE123456A', '../../etc/passwd0'] as $bad) {
     rcube_utils::$input['_tabid'] = $bad;
-    $p = new multitab_sync();
+    $api = new rcube_plugins_stub();
+    $p = new multitab_sync($api);
     $p->init();
     check('no hooks for tab id ' . json_encode($bad), $p->hooks, []);
+    check('no notification handler for tab id ' . json_encode($bad), $api->handlers, []);
 }
+
+// 8. a new message is announced once per session, not once per tab
+echo "\n8. Notification dedup\n";
+rcmail::$instance->config->values['multitab_sync_ttl'] = 3600;
+
+reset_all(10, 100);
+poll($A, $F);
+poll($B, $F);
+$storage->cnt['INBOX'] = 11;
+$storage->maxuid['INBOX'] = 105;
+poll($A, $F);
+check('the first tab to poll announces the new mail', $notified, '101:105');
+poll($B, $F);
+check('the second tab announces nothing', $notified, null);
+
+// a single arrival comes as a bare UID rather than a range
+reset_all(10, 100);
+poll($A, $F);
+$storage->cnt['INBOX'] = 11;
+$storage->maxuid['INBOX'] = 101;
+poll($A, $F);
+check('a single tab is announced to', $notified, '101');
+poll($A, $F);
+check('and not again on its next poll', $notified, null);
+
+// a tab that fell behind announces only the part nobody has reported yet
+reset_all(10, 100);
+poll($A, $F);
+poll($B, $F);
+$storage->cnt['INBOX'] = 12;
+$storage->maxuid['INBOX'] = 103;
+poll($A, $F);
+check('tab A announces the first arrivals', $notified, '101:103');
+$storage->cnt['INBOX'] = 14;
+$storage->maxuid['INBOX'] = 105;
+poll($B, $F);
+check('the tab left behind announces only the rest', $notified, '104:105');
+
+// the notifier plugin listed before this one in $config['plugins']
+reset_all(10, 100);
+poll($A, $F, true, 'before');
+poll($B, $F, true, 'before');
+$storage->cnt['INBOX'] = 11;
+$storage->maxuid['INBOX'] = 105;
+poll($A, $F, true, 'before');
+check('a notifier bound first still announces', $notified, '101:105');
+poll($B, $F, true, 'before');
+check('a notifier bound first still stays quiet in the second tab', $notified, null);
+
+// the Refresh button consumes the change without a notifier, as it does in
+// stock Roundcube, and that keeps the other tabs quiet too
+reset_all(10, 100);
+poll($A, $F);
+poll($B, $F);
+$storage->cnt['INBOX'] = 11;
+$storage->maxuid['INBOX'] = 105;
+poll($A, $F, true, 'none');
+check('the Refresh button announces nothing', $notified, null);
+poll($B, $F);
+check('and leaves the other tab quiet as well', $notified, null);
 
 echo "\n" . ($failures ? "{$failures} FAILURE(S)\n" : "All checks passed\n");
 exit($failures ? 1 : 0);
